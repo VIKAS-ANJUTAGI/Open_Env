@@ -209,3 +209,9 @@ class CodeReviewEnv:
         """Return full internal state for deterministic debugging and grading."""
 
         return self.state_manager.current_state()
+
+
+class OpenEnvBenchmark(CodeReviewEnv):
+    """Backward-compatible alias for existing validation commands."""
+
+    pass
