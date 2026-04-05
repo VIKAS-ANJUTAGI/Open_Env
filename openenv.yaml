@@ -1,3 +1,14 @@
 name: code-review-openenv
-description: placeholder
-version: 0.1
+description: Deterministic OpenEnv benchmark for real-world code review with easy, medium, and hard tasks.
+version: 1.0.0
+tags:
+	- openenv
+	- code-review
+	- benchmark
+	- deterministic
+entrypoint: inference.py
+language: python
+tasks:
+	- easy
+	- medium
+	- hard

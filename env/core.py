@@ -210,6 +210,11 @@ class CodeReviewEnv:
 
         return self.state_manager.current_state()
 
+    def close(self) -> None:
+        """Compatibility no-op for evaluators that expect close()."""
+
+        return None
+
 
 class OpenEnvBenchmark(CodeReviewEnv):
     """Backward-compatible alias for existing validation commands."""
