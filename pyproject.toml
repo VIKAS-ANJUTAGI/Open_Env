@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-code-review-benchmark"
+version = "0.1.0"
+description = "Deterministic OpenEnv benchmark for multi-step code review agents"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Vikas Anjutagi" }
+]
+dependencies = [
+  "pydantic>=2.0",
+  "fastapi>=0.100",
+  "uvicorn>=0.23",
+  "openai>=1.0"
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+[project.urls]
+Homepage = "https://huggingface.co/spaces/VIKAS-ANJUTAGI/OpenEnv-project"
+
+[tool.setuptools.packages.find]
+include = ["env*"]
