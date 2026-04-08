@@ -277,14 +277,26 @@ def _coerce_model_action(action_data: dict[str, Any], observation: CodeReviewObs
         }
 
     if action_type == "SUGGEST_FIX":
-        patch = action_data.get("suggested_patch")
-        if not isinstance(patch, str) or not patch.strip():
-            return _fallback_action(observation)
-        file_path = _normalize_file_path(action_data.get("file_path"), observation)
-        coerced: dict[str, Any] = {"action_type": "SUGGEST_FIX", "suggested_patch": patch.strip()}
-        if file_path:
-            coerced["file_path"] = file_path
-        return coerced
+     patch = action_data.get("suggested_patch") or action_data.get("diff")
+
+    if not isinstance(patch, str) or not patch.strip():
+        return _fallback_action(observation)
+
+    file_path = _normalize_file_path(action_data.get("file_path"), observation)
+
+    if not file_path:
+        file_path = observation.current_file or (
+            observation.files_changed[0] if observation.files_changed else None
+        )
+
+    if not file_path:
+        return _fallback_action(observation)
+
+    return {
+        "action_type": "SUGGEST_FIX",
+        "file_path": file_path,
+        "diff": patch.strip(),   # ✅ IMPORTANT
+    }
 
     decision_raw = str(action_data.get("finish_decision", "REQUEST_CHANGES")).strip().upper()
     decision = decision_raw if decision_raw in {"APPROVE", "REQUEST_CHANGES"} else "REQUEST_CHANGES"
@@ -315,11 +327,11 @@ def _call_model(client: Any, model_name: str, observation: CodeReviewObservation
         return _fallback_action(observation)
 
 
-def _normalize_action(action_data: dict[str, Any]) -> CodeReviewAction:
+def _normalize_action(action_data: dict[str, Any], observation: CodeReviewObservation) -> CodeReviewAction:
     try:
         return CodeReviewAction.model_validate(action_data)
     except Exception:
-        return CodeReviewAction.model_validate(_fallback_action())
+        return CodeReviewAction.model_validate(_fallback_action(observation))
 
 
 def _serialize_action(action: CodeReviewAction) -> str:
@@ -369,8 +381,7 @@ def _run_task(env: CodeReviewEnv, client: Any, model_name: str, task_name: str) 
     try:
         while steps_taken < observation.max_steps:
             action_data = _call_model(client, model_name, observation)
-            action = _normalize_action(action_data)
-
+            action = _normalize_action(action_data, observation)
             signature = (action.action_type, action.file_path or "")
             if signature == previous_signature:
                 repeated_count += 1
