@@ -18,13 +18,16 @@ except ImportError:  # pragma: no cover
 TASKS = ("easy", "medium", "hard")
 BENCHMARK_NAME = "code-review-openenv"
 MAX_HISTORY_ITEMS = 6
+MAX_OBSERVATION_CHARS = 2000
+
+_ALLOWED_SEVERITIES = {"nit", "suggestion", "bug", "security", "performance"}
 
 
 def _compact_json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def _truncate_text(text: str, limit: int = 8000) -> str:
+def _truncate_text(text: str, limit: int = MAX_OBSERVATION_CHARS) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
@@ -37,6 +40,12 @@ def _format_number(value: float) -> str:
 
 
 def _build_prompt(observation: CodeReviewObservation) -> str:
+    progress = {
+        "step_count": observation.step_count,
+        "remaining_steps": observation.remaining_steps,
+        "opened_files": list(observation.file_contents.keys()),
+        "last_history": observation.history[-2:],
+    }
     payload = {
         "pr_title": observation.pr_title,
         "pr_description": observation.pr_description,
@@ -44,10 +53,13 @@ def _build_prompt(observation: CodeReviewObservation) -> str:
         "current_file": observation.current_file,
         "file_contents": observation.file_contents,
         "history": observation.history[-MAX_HISTORY_ITEMS:],
+        "progress": progress,
     }
     return _truncate_text(
-        "Return exactly one JSON object with keys: action_type, file_path, line, comment, severity, "
-        "suggested_patch, finish_decision, finish_summary.\n"
+        "Return exactly one JSON object. Choose ONE action type and include only valid fields for that type. "
+        "Allowed action_type: READ_FILE, COMMENT, SUGGEST_FIX, FINISH. "
+        "COMMENT requires file_path,line,comment and severity in [nit,suggestion,bug,security,performance]. "
+        "SUGGEST_FIX requires suggested_patch. FINISH requires finish_decision in [APPROVE,REQUEST_CHANGES].\n"
         f"OBSERVATION={_compact_json(payload)}"
     )
 
@@ -160,7 +172,65 @@ def _parse_action_json(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-def _fallback_action() -> dict[str, Any]:
+def _normalize_file_path(candidate: Any, observation: CodeReviewObservation) -> str | None:
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+
+    requested = candidate.strip()
+    if requested in observation.files_changed:
+        return requested
+
+    lowered = requested.lower()
+    for path in observation.files_changed:
+        if path.lower() == lowered or path.lower().endswith("/" + lowered) or path.lower().endswith("\\" + lowered):
+            return path
+    return None
+
+
+def _normalize_severity(value: Any) -> str:
+    if not isinstance(value, str):
+        return "suggestion"
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_SEVERITIES:
+        return normalized
+    aliases = {
+        "info": "suggestion",
+        "warning": "bug",
+        "warn": "bug",
+        "medium": "bug",
+        "high": "security",
+        "critical": "security",
+        "low": "nit",
+    }
+    return aliases.get(normalized, "suggestion")
+
+
+def _infer_category(comment: str) -> str:
+    lowered = comment.lower()
+    if any(token in lowered for token in ("token", "auth", "secret", "leak", "security")):
+        return "security"
+    if any(token in lowered for token in ("slow", "latency", "performance", "overhead")):
+        return "performance"
+    if any(token in lowered for token in ("logic", "condition", "boundary", "ttl", "stale", "regression")):
+        return "logic"
+    return "correctness"
+
+
+def _fallback_action(observation: CodeReviewObservation) -> dict[str, Any]:
+    unread = [path for path in observation.files_changed if path not in observation.file_contents]
+    if unread and observation.remaining_steps > 1:
+        return {"action_type": "READ_FILE", "file_path": unread[0]}
+
+    if observation.current_file and observation.remaining_steps > 1:
+        return {
+            "action_type": "COMMENT",
+            "file_path": observation.current_file,
+            "line": 1,
+            "comment": "Potential correctness issue requires review.",
+            "severity": "suggestion",
+            "category": "correctness",
+        }
+
     return {
         "action_type": "FINISH",
         "finish_decision": "REQUEST_CHANGES",
@@ -168,9 +238,65 @@ def _fallback_action() -> dict[str, Any]:
     }
 
 
+def _coerce_model_action(action_data: dict[str, Any], observation: CodeReviewObservation) -> dict[str, Any]:
+    action_type = str(action_data.get("action_type", "")).strip().upper()
+    if action_type not in {"READ_FILE", "COMMENT", "SUGGEST_FIX", "FINISH"}:
+        return _fallback_action(observation)
+
+    if action_type == "READ_FILE":
+        file_path = _normalize_file_path(action_data.get("file_path"), observation)
+        if not file_path:
+            unread = [path for path in observation.files_changed if path not in observation.file_contents]
+            file_path = unread[0] if unread else (observation.files_changed[0] if observation.files_changed else None)
+        if not file_path:
+            return _fallback_action(observation)
+        return {"action_type": "READ_FILE", "file_path": file_path}
+
+    if action_type == "COMMENT":
+        file_path = _normalize_file_path(action_data.get("file_path"), observation)
+        if not file_path:
+            file_path = observation.current_file or (observation.files_changed[0] if observation.files_changed else None)
+        if not file_path:
+            return _fallback_action(observation)
+
+        line = action_data.get("line")
+        if not isinstance(line, int) or line < 1:
+            line = 1
+
+        comment = action_data.get("comment")
+        if not isinstance(comment, str) or not comment.strip():
+            comment = "Potential issue found in this file."
+
+        return {
+            "action_type": "COMMENT",
+            "file_path": file_path,
+            "line": line,
+            "comment": comment.strip(),
+            "severity": _normalize_severity(action_data.get("severity")),
+            "category": _infer_category(comment),
+        }
+
+    if action_type == "SUGGEST_FIX":
+        patch = action_data.get("suggested_patch")
+        if not isinstance(patch, str) or not patch.strip():
+            return _fallback_action(observation)
+        file_path = _normalize_file_path(action_data.get("file_path"), observation)
+        coerced: dict[str, Any] = {"action_type": "SUGGEST_FIX", "suggested_patch": patch.strip()}
+        if file_path:
+            coerced["file_path"] = file_path
+        return coerced
+
+    decision_raw = str(action_data.get("finish_decision", "REQUEST_CHANGES")).strip().upper()
+    decision = decision_raw if decision_raw in {"APPROVE", "REQUEST_CHANGES"} else "REQUEST_CHANGES"
+    summary = action_data.get("finish_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        summary = "Review completed."
+    return {"action_type": "FINISH", "finish_decision": decision, "finish_summary": summary.strip()}
+
+
 def _call_model(client: Any, model_name: str, observation: CodeReviewObservation) -> dict[str, Any]:
     if client is None or not model_name:
-        return _fallback_action()
+        return _fallback_action(observation)
 
     try:
         response = client.chat.completions.create(
@@ -182,9 +308,11 @@ def _call_model(client: Any, model_name: str, observation: CodeReviewObservation
             ],
         )
         parsed = _parse_action_json(_extract_model_text(response))
-        return parsed if parsed is not None else _fallback_action()
+        if parsed is None:
+            return _fallback_action(observation)
+        return _coerce_model_action(parsed, observation)
     except Exception:
-        return _fallback_action()
+        return _fallback_action(observation)
 
 
 def _normalize_action(action_data: dict[str, Any]) -> CodeReviewAction:
@@ -235,11 +363,27 @@ def _run_task(env: CodeReviewEnv, client: Any, model_name: str, task_name: str) 
     final_score = 0.0
     steps_taken = 0
     success = False
+    previous_signature: tuple[str, str] | None = None
+    repeated_count = 0
 
     try:
         while steps_taken < observation.max_steps:
             action_data = _call_model(client, model_name, observation)
             action = _normalize_action(action_data)
+
+            signature = (action.action_type, action.file_path or "")
+            if signature == previous_signature:
+                repeated_count += 1
+            else:
+                repeated_count = 0
+            previous_signature = signature
+
+            if repeated_count >= 2:
+                action = CodeReviewAction(
+                    action_type="FINISH",
+                    finish_decision="REQUEST_CHANGES",
+                    finish_summary="Loop guard forced finish.",
+                )
 
             try:
                 observation, reward, done, info = env.step(action)

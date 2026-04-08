@@ -15,7 +15,8 @@ dependencies = [
   "pydantic>=2.0",
   "fastapi>=0.100",
   "uvicorn>=0.23",
-  "openai>=1.0"
+  "openai>=1.0",
+  "openenv-core>=0.2.0",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -28,5 +29,8 @@ classifiers = [
 [project.urls]
 Homepage = "https://huggingface.co/spaces/VIKAS-ANJUTAGI/OpenEnv-project"
 
+[project.scripts]
+server = "server.app:app"
+
 [tool.setuptools.packages.find]
-include = ["env*"]
+include = ["env*", "server*"]

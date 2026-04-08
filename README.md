@@ -1,3 +1,13 @@
+---
+title: OpenEnv Code Review Benchmark
+emoji: 🤖
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_file: inference.py
+pinned: false
+---
+
 # OpenEnv CodeReview Benchmark
 
 **A realistic, multi-step environment for evaluating AI code review agents under production-like constraints.**

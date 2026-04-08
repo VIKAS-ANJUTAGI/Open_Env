@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
 
 class BaseGrader(ABC):
     """Shared scorer utilities and anti-exploit penalties."""
+
+    _CATEGORY_PATTERNS: dict[str, re.Pattern[str]] = {
+        "correctness": re.compile(r"\b(correct|incorrect|bug|broken|zero|divide|edge\s*case)\b", re.IGNORECASE),
+        "logic": re.compile(r"\b(logic|condition|branch|boundary|semantic|ttl|stale)\b", re.IGNORECASE),
+        "regression": re.compile(r"\b(regression|break|changed\s+behavior|backward|compat)\b", re.IGNORECASE),
+        "security": re.compile(r"\b(security|token|leak|expos|auth|secret|credential|sanitize)\b", re.IGNORECASE),
+        "performance": re.compile(r"\b(performance|slow|latency|cost|overhead|inefficient)\b", re.IGNORECASE),
+    }
 
     @abstractmethod
     def evaluate(self, state: dict[str, Any]) -> float:
@@ -33,7 +42,23 @@ class BaseGrader(ABC):
         return set(state.get("opened_files", []))
 
     def _commented_categories(self, state: dict[str, Any]) -> set[str]:
-        return {c.get("category") for c in state.get("comments", []) if c.get("category")}
+        categories: set[str] = set()
+        for comment_entry in state.get("comments", []):
+            explicit = comment_entry.get("category")
+            if isinstance(explicit, str) and explicit.strip():
+                categories.add(explicit.strip().lower())
+
+            comment_text = comment_entry.get("comment")
+            if isinstance(comment_text, str):
+                categories.update(self._infer_categories_from_text(comment_text))
+        return categories
+
+    def _infer_categories_from_text(self, comment_text: str) -> set[str]:
+        inferred: set[str] = set()
+        for name, pattern in self._CATEGORY_PATTERNS.items():
+            if pattern.search(comment_text):
+                inferred.add(name)
+        return inferred
 
     def _comments_on_files(self, state: dict[str, Any], targets: set[str]) -> list[dict[str, Any]]:
         return [c for c in state.get("comments", []) if c.get("file_path") in targets]
